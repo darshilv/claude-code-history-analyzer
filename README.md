@@ -28,7 +28,7 @@ A local web application that analyzes your Claude Code conversation history to p
 
 1. Navigate to the project directory:
    ```bash
-   cd ~/Documents/ux_projects/claude-analytics
+   cd ~/Code/claude-analytics
    ```
 
 2. Install all dependencies (root, backend, and frontend):
