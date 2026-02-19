@@ -1,30 +1,71 @@
 import { useEffect, useState } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { fetchAnalyticsSummary, type AnalyticsSummary } from '@/lib/api';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import {
+  fetchAnalyticsSummary,
+  fetchSourceSchema,
+  type AnalyticsSummary,
+  type AnalyticsSource,
+  type SourceSchema
+} from '@/lib/api';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, ComposedChart, Line } from 'recharts';
 import { Activity, TrendingUp, MessageSquare, Wrench } from 'lucide-react';
 
 const COLORS = ['#3b82f6', '#8b5cf6', '#06b6d4', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#6366f1'];
+const REFRESH_INTERVAL_MS = 30000;
+const SCHEMA_LIST_LIMIT = 8;
+const TIMELINE_LABEL_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric'
+});
 
-export function Dashboard() {
+function formatTimelineDate(dateString: string) {
+  const [year, month, day] = dateString.split('-').map(Number);
+  if (!year || !month || !day) {
+    return dateString;
+  }
+  return TIMELINE_LABEL_FORMATTER.format(new Date(Date.UTC(year, month - 1, day)));
+}
+
+interface DashboardProps {
+  source: Exclude<AnalyticsSource, 'all'>;
+  onBack: () => void;
+}
+
+export function Dashboard({ source, onBack }: DashboardProps) {
   const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null);
+  const [schema, setSchema] = useState<SourceSchema | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const sourceName = source.charAt(0).toUpperCase() + source.slice(1);
 
   useEffect(() => {
     loadAnalytics();
-  }, []);
 
-  async function loadAnalytics() {
+    const intervalId = window.setInterval(() => {
+      loadAnalytics(false);
+    }, REFRESH_INTERVAL_MS);
+
+    return () => window.clearInterval(intervalId);
+  }, [source]);
+
+  async function loadAnalytics(showLoadingState = true) {
     try {
-      setLoading(true);
-      const data = await fetchAnalyticsSummary();
-      setAnalytics(data);
+      if (showLoadingState) {
+        setLoading(true);
+      }
+      const [summaryData, schemaData] = await Promise.all([
+        fetchAnalyticsSummary(source),
+        fetchSourceSchema(source)
+      ]);
+      setAnalytics(summaryData);
+      setSchema(schemaData);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load analytics');
     } finally {
-      setLoading(false);
+      if (showLoadingState) {
+        setLoading(false);
+      }
     }
   }
 
@@ -52,7 +93,7 @@ export function Dashboard() {
               Make sure the backend server is running on port 3001
             </p>
             <button
-              onClick={loadAnalytics}
+              onClick={() => loadAnalytics()}
               className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
             >
               Retry
@@ -84,23 +125,45 @@ export function Dashboard() {
       messages: data.messageCount
     }));
 
+  const timelineData = analytics.timeline.byDay.map(point => ({
+    ...point,
+    label: formatTimelineDate(point.date)
+  }));
+
+  const latestTimelinePoint = timelineData[timelineData.length - 1];
+  const conversationFieldPreview = schema?.conversationFields.slice(0, SCHEMA_LIST_LIMIT) || [];
+  const metadataFieldPreview = schema?.metadataFields.slice(0, SCHEMA_LIST_LIMIT) || [];
+  const messageTypePreview = schema?.messageTypes.slice(0, SCHEMA_LIST_LIMIT) || [];
+  const uniqueConversationFields = schema?.uniqueConversationFields || [];
+  const uniqueMetadataFields = schema?.uniqueMetadataFields || [];
+  const uniqueMessageFields = schema?.uniqueMessageFields || [];
+
   return (
     <div className="container mx-auto p-6 space-y-6">
       {/* Header */}
       <div className="space-y-2">
-        <h1 className="text-4xl font-bold">Claude Code Analytics</h1>
-        <p className="text-muted-foreground">Insights from your conversation history</p>
+        <button
+          onClick={onBack}
+          className="text-sm px-3 py-1.5 border rounded-md hover:bg-secondary transition-colors"
+        >
+          Back to Summary
+        </button>
+        <h1 className="text-4xl font-bold">{sourceName} Analytics</h1>
+        <p className="text-muted-foreground">Detailed insights for {sourceName} conversations</p>
       </div>
 
       {/* Overview Cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Total Conversations</CardTitle>
+            <CardTitle className="text-sm font-medium">Conversation Files</CardTitle>
             <MessageSquare className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{analytics.overview.totalConversations}</div>
+            <p className="text-xs text-muted-foreground">
+              {analytics.overview.totalSessions} sessions + {analytics.overview.totalSubagentRuns} subagent runs
+            </p>
             <p className="text-xs text-muted-foreground">Across {analytics.overview.totalProjects} projects</p>
           </CardContent>
         </Card>
@@ -143,11 +206,46 @@ export function Dashboard() {
         </Card>
       </div>
 
+      {/* Timeline */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Activity Timeline</CardTitle>
+          <CardDescription>Daily progression of sessions, subagent runs, and chat-message volume</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <ResponsiveContainer width="100%" height={320}>
+            <ComposedChart data={timelineData}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="label" minTickGap={24} />
+              <YAxis yAxisId="left" allowDecimals={false} />
+              <YAxis yAxisId="right" orientation="right" allowDecimals={false} />
+              <Tooltip
+                labelFormatter={(value, payload) => {
+                  if (payload && payload.length > 0) {
+                    return payload[0].payload.date;
+                  }
+                  return String(value);
+                }}
+              />
+              <Legend />
+              <Bar yAxisId="left" dataKey="sessions" stackId="conversation_count" fill="#3b82f6" name="Sessions" />
+              <Bar yAxisId="left" dataKey="subagentRuns" stackId="conversation_count" fill="#06b6d4" name="Subagent Runs" />
+              <Line yAxisId="right" type="monotone" dataKey="chatMessages" stroke="#f59e0b" strokeWidth={2} dot={false} name="Chat Messages" />
+            </ComposedChart>
+          </ResponsiveContainer>
+          {latestTimelinePoint && (
+            <p className="text-xs text-muted-foreground mt-3">
+              Cumulative: {latestTimelinePoint.cumulativeSessions} sessions, {latestTimelinePoint.cumulativeSubagentRuns} subagent runs, {latestTimelinePoint.cumulativeChatMessages.toLocaleString()} chat messages
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
       {/* Tool Usage Chart */}
       <Card>
         <CardHeader>
           <CardTitle>Tool Usage Frequency</CardTitle>
-          <CardDescription>Most frequently used Claude Code tools</CardDescription>
+          <CardDescription>Most frequently used tools in {sourceName} sessions</CardDescription>
         </CardHeader>
         <CardContent>
           <ResponsiveContainer width="100%" height={300}>
@@ -173,7 +271,7 @@ export function Dashboard() {
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {analytics.recommendations.length === 0 ? (
               <p className="text-sm text-muted-foreground col-span-full">
-                Keep using Claude Code! Recommendations will appear as patterns emerge.
+                Keep using {sourceName}! Recommendations will appear as patterns emerge.
               </p>
             ) : (
               analytics.recommendations.map((rec, index) => (
@@ -216,7 +314,9 @@ export function Dashboard() {
                   cx="50%"
                   cy="50%"
                   labelLine={false}
-                  label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                  label={({ name, percent }: { name?: string; percent?: number }) =>
+                    `${name ?? ''} ${((percent ?? 0) * 100).toFixed(0)}%`
+                  }
                   outerRadius={80}
                   fill="#8884d8"
                   dataKey="value"
@@ -256,7 +356,7 @@ export function Dashboard() {
       {/* Conversation Patterns Section */}
       <div className="space-y-2 mt-6">
         <h2 className="text-2xl font-bold">Conversation Patterns</h2>
-        <p className="text-muted-foreground">Insights into how you interact with Claude Code</p>
+        <p className="text-muted-foreground">Insights into how you interact with {sourceName}</p>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -341,6 +441,115 @@ export function Dashboard() {
           <p className="text-xs text-muted-foreground mt-4">
             Understanding these patterns can help you anticipate your workflow and be more efficient
           </p>
+        </CardContent>
+      </Card>
+
+      {/* Schema Inspector */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Schema Inspector</CardTitle>
+          <CardDescription>
+            Source-specific parameters and field coverage to compare data richness across assistants
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Unique Conversation Fields</p>
+              {uniqueConversationFields.length === 0 ? (
+                <p className="text-xs text-muted-foreground">No source-unique top-level conversation fields</p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {uniqueConversationFields.map(field => (
+                    <span key={field} className="text-xs px-2 py-1 rounded bg-secondary">
+                      {field}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Unique Metadata Fields</p>
+              {uniqueMetadataFields.length === 0 ? (
+                <p className="text-xs text-muted-foreground">No source-unique metadata fields</p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {uniqueMetadataFields.map(field => (
+                    <span key={field} className="text-xs px-2 py-1 rounded bg-secondary">
+                      {field}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Unique Message Fields</p>
+              {uniqueMessageFields.length === 0 ? (
+                <p className="text-xs text-muted-foreground">No source-unique message fields</p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {uniqueMessageFields.map(field => (
+                    <span key={field} className="text-xs px-2 py-1 rounded bg-secondary">
+                      {field}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-3">
+            <div>
+              <p className="text-sm font-medium mb-2">Top Conversation Fields</p>
+              <div className="space-y-1">
+                {conversationFieldPreview.map(item => (
+                  <div key={item.name} className="flex items-center justify-between text-xs">
+                    <span className="font-mono">{item.name}</span>
+                    <span className="text-muted-foreground">{item.count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div>
+              <p className="text-sm font-medium mb-2">Top Metadata Fields</p>
+              <div className="space-y-1">
+                {metadataFieldPreview.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">No metadata captured for this source</p>
+                ) : (
+                  metadataFieldPreview.map(item => (
+                    <div key={item.name} className="flex items-center justify-between text-xs">
+                      <span className="font-mono">{item.name}</span>
+                      <span className="text-muted-foreground">{item.count}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+            <div>
+              <p className="text-sm font-medium mb-2">Message Type Mix</p>
+              <div className="space-y-1">
+                {messageTypePreview.map(item => (
+                  <div key={item.name} className="flex items-center justify-between text-xs">
+                    <span className="font-mono">{item.name}</span>
+                    <span className="text-muted-foreground">{item.count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {schema && schema.toolNames.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Detected Tool Names</p>
+              <div className="flex flex-wrap gap-2">
+                {schema.toolNames.slice(0, 12).map(item => (
+                  <span key={item.name} className="text-xs px-2 py-1 rounded bg-secondary">
+                    {item.name} ({item.count})
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>

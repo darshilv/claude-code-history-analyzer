@@ -226,6 +226,7 @@ export function analyzePromptingPatterns(conversations) {
  * Analyze conversation flow patterns
  */
 export function analyzeConversationFlows(conversations) {
+  const totalConversations = conversations.length;
   let singleTurnCount = 0;
   let shortConvCount = 0; // 2-5 turns
   let mediumConvCount = 0; // 6-15 turns
@@ -259,22 +260,22 @@ export function analyzeConversationFlows(conversations) {
     distribution: {
       singleTurn: {
         count: singleTurnCount,
-        percentage: Math.round((singleTurnCount / conversations.length) * 100),
+        percentage: totalConversations > 0 ? Math.round((singleTurnCount / totalConversations) * 100) : 0,
         description: 'One question, quick answer'
       },
       shortConversations: {
         count: shortConvCount,
-        percentage: Math.round((shortConvCount / conversations.length) * 100),
+        percentage: totalConversations > 0 ? Math.round((shortConvCount / totalConversations) * 100) : 0,
         description: '2-5 back-and-forth exchanges'
       },
       mediumConversations: {
         count: mediumConvCount,
-        percentage: Math.round((mediumConvCount / conversations.length) * 100),
+        percentage: totalConversations > 0 ? Math.round((mediumConvCount / totalConversations) * 100) : 0,
         description: '6-15 exchanges - typical task completion'
       },
       longConversations: {
         count: longConvCount,
-        percentage: Math.round((longConvCount / conversations.length) * 100),
+        percentage: totalConversations > 0 ? Math.round((longConvCount / totalConversations) * 100) : 0,
         description: '16+ exchanges - complex or iterative work'
       }
     }
@@ -362,10 +363,117 @@ export function analyzeProjectActivity(conversations) {
   return projectStats;
 }
 
+function getTimestampDateKey(timestamp) {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+function countToolUsesInMessage(msg) {
+  if (msg.type !== 'assistant' || !Array.isArray(msg.message?.content)) {
+    return 0;
+  }
+  return msg.message.content.filter(item => item.type === 'tool_use').length;
+}
+
+/**
+ * Analyze timeline progression over time (daily)
+ */
+export function analyzeTimeline(conversations) {
+  const timelineByDay = new Map();
+
+  function getOrCreateDay(dateKey) {
+    if (!timelineByDay.has(dateKey)) {
+      timelineByDay.set(dateKey, {
+        date: dateKey,
+        sessions: 0,
+        subagentRuns: 0,
+        totalConversations: 0,
+        chatMessages: 0,
+        totalEvents: 0,
+        toolUses: 0
+      });
+    }
+    return timelineByDay.get(dateKey);
+  }
+
+  conversations.forEach(conv => {
+    let firstDateKey = null;
+
+    conv.messages.forEach(msg => {
+      if (msg.timestamp) {
+        const dateKey = getTimestampDateKey(msg.timestamp);
+        if (dateKey && (!firstDateKey || dateKey < firstDateKey)) {
+          firstDateKey = dateKey;
+        }
+      }
+    });
+
+    if (!firstDateKey) {
+      return;
+    }
+
+    conv.messages.forEach(msg => {
+      const dateKey = msg.timestamp ? getTimestampDateKey(msg.timestamp) : firstDateKey;
+      const day = getOrCreateDay(dateKey || firstDateKey);
+      day.totalEvents++;
+      if (msg.type === 'user' || msg.type === 'assistant') {
+        day.chatMessages++;
+      }
+      day.toolUses += countToolUsesInMessage(msg);
+    });
+
+    const day = getOrCreateDay(firstDateKey);
+    const isSubagent = conv.source === 'subagent';
+    day.totalConversations++;
+    if (isSubagent) {
+      day.subagentRuns++;
+    } else {
+      day.sessions++;
+    }
+  });
+
+  const byDay = Array.from(timelineByDay.values())
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  let cumulativeConversations = 0;
+  let cumulativeSessions = 0;
+  let cumulativeSubagentRuns = 0;
+  let cumulativeChatMessages = 0;
+  let cumulativeTotalEvents = 0;
+  let cumulativeToolUses = 0;
+
+  byDay.forEach(day => {
+    cumulativeConversations += day.totalConversations;
+    cumulativeSessions += day.sessions;
+    cumulativeSubagentRuns += day.subagentRuns;
+    cumulativeChatMessages += day.chatMessages;
+    cumulativeTotalEvents += day.totalEvents;
+    cumulativeToolUses += day.toolUses;
+
+    day.cumulativeConversations = cumulativeConversations;
+    day.cumulativeSessions = cumulativeSessions;
+    day.cumulativeSubagentRuns = cumulativeSubagentRuns;
+    day.cumulativeChatMessages = cumulativeChatMessages;
+    day.cumulativeTotalEvents = cumulativeTotalEvents;
+    day.cumulativeToolUses = cumulativeToolUses;
+  });
+
+  return {
+    byDay
+  };
+}
+
 /**
  * Generate intelligent recommendations based on conversation patterns
  */
 export function generateRecommendations(conversations, toolUsage, taskPatterns, promptingPatterns, conversationFlows) {
+  if (conversations.length === 0) {
+    return [];
+  }
+
   const recommendations = [];
 
   // Analyze tool usage for batch operation opportunities
@@ -522,6 +630,7 @@ export function generateSummary(conversations) {
   const metrics = analyzeConversationMetrics(conversations);
   const taskPatterns = analyzeTaskPatterns(conversations);
   const projectActivity = analyzeProjectActivity(conversations);
+  const timeline = analyzeTimeline(conversations);
   const promptingPatterns = analyzePromptingPatterns(conversations);
   const conversationFlows = analyzeConversationFlows(conversations);
   const toolSequences = analyzeToolSequences(conversations);
@@ -538,10 +647,14 @@ export function generateSummary(conversations) {
   const totalMessages = metrics.reduce((sum, m) => sum + m.messageCount, 0);
   const totalToolUses = metrics.reduce((sum, m) => sum + m.toolUseCount, 0);
   const avgMessagesPerConversation = totalMessages / conversations.length || 0;
+  const totalSubagentRuns = conversations.filter(conv => conv.source === 'subagent').length;
+  const totalSessions = conversations.length - totalSubagentRuns;
 
   return {
     overview: {
       totalConversations: conversations.length,
+      totalSessions,
+      totalSubagentRuns,
       totalMessages,
       totalToolUses,
       avgMessagesPerConversation: Math.round(avgMessagesPerConversation * 10) / 10,
@@ -551,6 +664,7 @@ export function generateSummary(conversations) {
     conversationMetrics: metrics.slice(0, 20), // Latest 20 for overview
     taskPatterns,
     projectActivity,
+    timeline,
     recommendations,
     promptingPatterns,
     conversationFlows,
@@ -563,6 +677,7 @@ export default {
   analyzeConversationMetrics,
   analyzeTaskPatterns,
   analyzeProjectActivity,
+  analyzeTimeline,
   generateRecommendations,
   analyzePromptingPatterns,
   analyzeConversationFlows,
